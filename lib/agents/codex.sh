@@ -10,12 +10,10 @@ invoke_codex() {
     local cmd=(codex exec --json)
     [[ -n "$model" ]] && cmd+=(--model "$model")
     [[ -n "$sandbox" ]] && cmd+=(--sandbox "$sandbox")
-    # Add extra flags
     if [[ -n "$extra_flags" ]]; then
         read -ra ef <<< "$extra_flags"
         cmd+=("${ef[@]}")
     fi
-    # Prompt as positional arg (codex also accepts stdin via "-")
     cmd+=("$prompt")
 
     local timeout_secs="${OPT_TIMEOUT:-${CONFIG[fanout_timeout]:-120}}"
@@ -46,36 +44,31 @@ normalize_codex() {
         return 1
     fi
 
-    # Codex outputs JSONL — filter for message lines, extract text content
+    # Codex outputs JSONL. Structure per line:
+    #   {"type":"item.completed","item":{"type":"agent_message","text":"..."}}
+    #   {"type":"item.completed","item":{"type":"reasoning","text":"..."}}
+    #   {"type":"turn.completed","usage":{...}}
+    # We want lines where .item.type == "agent_message"
     local text=""
-    local line_count
-    line_count=$(echo "$raw" | wc -l)
+    local collected=""
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        local line_type
+        line_type=$(echo "$line" | json_get '.type')
 
-    if (( line_count > 1 )); then
-        # JSONL mode: extract text from message items
-        local collected=""
-        while IFS= read -r line; do
-            [[ -z "$line" ]] && continue
-            local msg_type
-            msg_type=$(echo "$line" | json_get '.type')
-            if [[ "$msg_type" == "agent_message" || "$msg_type" == "message" ]]; then
+        if [[ "$line_type" == "item.completed" ]]; then
+            local item_type
+            item_type=$(echo "$line" | json_get '.item.type')
+            if [[ "$item_type" == "agent_message" ]]; then
                 local item_text
                 item_text=$(echo "$line" | json_get '.item.text')
-                [[ -z "$item_text" ]] && item_text=$(echo "$line" | json_get '.text')
-                [[ -z "$item_text" ]] && item_text=$(echo "$line" | json_get '.content')
                 [[ -n "$item_text" ]] && collected+="$item_text"
             fi
-        done <<< "$raw"
-        text="$collected"
-    else
-        # Single JSON: try common fields
-        text=$(echo "$raw" | json_get '.result')
-        [[ -z "$text" ]] && text=$(echo "$raw" | json_get '.text')
-        [[ -z "$text" ]] && text=$(echo "$raw" | json_get '.output')
-    fi
+        fi
+    done <<< "$raw"
+    text="$collected"
 
     if [[ -z "$text" ]]; then
-        # Last resort: use raw output as text
         text="$raw"
     fi
 
