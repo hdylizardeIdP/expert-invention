@@ -7,14 +7,7 @@ invoke_codex() {
     local sandbox="${CONFIG[codex_sandbox]:-read-only}"
     local extra_flags="${CONFIG[codex_extra_flags]:-}"
 
-    local cmd=(codex exec)
-
-    # Write prompt to temp file for large prompts
-    local tmpfile
-    tmpfile=$(mktemp "${TMPDIR:-/tmp}/orch-codex.XXXXXX")
-    printf '%s' "$prompt" > "$tmpfile"
-
-    cmd+=(--json)
+    local cmd=(codex exec --json)
     [[ -n "$model" ]] && cmd+=(--model "$model")
     [[ -n "$sandbox" ]] && cmd+=(--sandbox "$sandbox")
     # Add extra flags
@@ -22,6 +15,7 @@ invoke_codex() {
         read -ra ef <<< "$extra_flags"
         cmd+=("${ef[@]}")
     fi
+    # Prompt as positional arg (codex also accepts stdin via "-")
     cmd+=("$prompt")
 
     local timeout_secs="${OPT_TIMEOUT:-${CONFIG[fanout_timeout]:-120}}"
@@ -32,7 +26,6 @@ invoke_codex() {
     local raw_output exit_code
     raw_output=$(timeout "$timeout_secs" "${cmd[@]}" 2>/dev/null)
     exit_code=$?
-    rm -f "$tmpfile"
 
     local end_ms
     end_ms=$(now_ms)
@@ -53,22 +46,23 @@ normalize_codex() {
         return 1
     fi
 
-    # Codex outputs JSONL — filter for agent_message lines, extract .item.text
-    # Also handle single JSON object case
+    # Codex outputs JSONL — filter for message lines, extract text content
     local text=""
     local line_count
     line_count=$(echo "$raw" | wc -l)
 
     if (( line_count > 1 )); then
-        # JSONL mode: extract text from agent_message items
+        # JSONL mode: extract text from message items
         local collected=""
         while IFS= read -r line; do
             [[ -z "$line" ]] && continue
             local msg_type
             msg_type=$(echo "$line" | json_get '.type')
-            if [[ "$msg_type" == "agent_message" ]]; then
+            if [[ "$msg_type" == "agent_message" || "$msg_type" == "message" ]]; then
                 local item_text
                 item_text=$(echo "$line" | json_get '.item.text')
+                [[ -z "$item_text" ]] && item_text=$(echo "$line" | json_get '.text')
+                [[ -z "$item_text" ]] && item_text=$(echo "$line" | json_get '.content')
                 [[ -n "$item_text" ]] && collected+="$item_text"
             fi
         done <<< "$raw"
@@ -85,6 +79,5 @@ normalize_codex() {
         text="$raw"
     fi
 
-    # Codex generally doesn't provide cost info
     build_normalized "codex" "$text" "false" "$duration_ms" "0" "null"
 }

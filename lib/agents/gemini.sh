@@ -6,25 +6,19 @@ invoke_gemini() {
     local model="${OPT_MODEL:-${CONFIG[gemini_model]:-}}"
     local approval="${CONFIG[gemini_approval_mode]:-default}"
 
-    local cmd=(gemini -p)
-
-    cmd+=(-o json)
+    # gemini -p takes the prompt as its argument value, not stdin
+    local cmd=(gemini -p "$prompt" -o json)
     [[ -n "$model" ]] && cmd+=(--model "$model")
+    [[ "$approval" != "default" ]] && cmd+=(--approval-mode "$approval")
 
     local timeout_secs="${OPT_TIMEOUT:-${CONFIG[fanout_timeout]:-120}}"
     local start_ms
     start_ms=$(now_ms)
 
-    # Write prompt to temp file, pipe via stdin for large prompts
-    local tmpfile
-    tmpfile=$(mktemp "${TMPDIR:-/tmp}/orch-gemini.XXXXXX")
-    printf '%s' "$prompt" > "$tmpfile"
-
-    log_debug "gemini cmd: ${cmd[*]} < $tmpfile"
+    log_debug "gemini cmd: ${cmd[*]}"
     local raw_output exit_code
-    raw_output=$(timeout "$timeout_secs" "${cmd[@]}" < "$tmpfile" 2>/dev/null)
+    raw_output=$(timeout "$timeout_secs" "${cmd[@]}" 2>/dev/null)
     exit_code=$?
-    rm -f "$tmpfile"
 
     local end_ms
     end_ms=$(now_ms)
@@ -45,18 +39,18 @@ normalize_gemini() {
         return 1
     fi
 
-    # Extract text from Gemini JSON output (.response)
+    # Gemini JSON: .response has the text
     local text
     text=$(echo "$raw" | json_get '.response')
-    [[ -z "$text" ]] && text=$(echo "$raw" | json_get '.text')
-    [[ -z "$text" ]] && text=$(echo "$raw" | json_get '.result')
-    [[ -z "$text" ]] && text=$(echo "$raw" | json_get '.content')
 
     if [[ -z "$text" ]]; then
         build_normalized "gemini" "failed to parse gemini output" "true" "$duration_ms" "0" "null"
         return 1
     fi
 
-    # Gemini generally doesn't provide cost info
-    build_normalized "gemini" "$text" "false" "$duration_ms" "0" "null"
+    # Estimate cost from token counts if available
+    # Gemini doesn't directly report cost, but we can try to extract tokens
+    local cost_usd="0"
+
+    build_normalized "gemini" "$text" "false" "$duration_ms" "$cost_usd" "null"
 }
