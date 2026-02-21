@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── Resolve script directory ──
+ORCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ORCH_TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/orch.XXXXXX")
+trap 'rm -rf "$ORCH_TMPDIR"' EXIT
+
+# ── Source libraries ──
+source "${ORCH_DIR}/lib/util.sh"
+source "${ORCH_DIR}/lib/log.sh"
+source "${ORCH_DIR}/lib/json.sh"
+source "${ORCH_DIR}/lib/config.sh"
+source "${ORCH_DIR}/lib/normalize.sh"
+source "${ORCH_DIR}/lib/router.sh"
+source "${ORCH_DIR}/lib/agents/claude.sh"
+source "${ORCH_DIR}/lib/agents/codex.sh"
+source "${ORCH_DIR}/lib/agents/gemini.sh"
+source "${ORCH_DIR}/lib/fanout.sh"
+source "${ORCH_DIR}/lib/pipeline.sh"
+source "${ORCH_DIR}/lib/cost.sh"
+source "${ORCH_DIR}/lib/history.sh"
+
+# ── Initialize JSON tool ──
+_detect_json_tool
+
+# ── Option defaults ──
+OPT_AGENT=""
+OPT_TASK=""
+OPT_MODEL=""
+OPT_FANOUT=false
+OPT_PIPELINE=""
+OPT_DRY_RUN=false
+OPT_OUTPUT_FORMAT=""
+OPT_CONFIG=""
+OPT_VERBOSE=false
+OPT_TIMEOUT=""
+OPT_SHOW_COST=false
+OPT_SHOW_HISTORY=false
+OPT_REPLAY=""
+PROMPT=""
+
+# ── Usage ──
+usage() {
+    cat <<'EOF'
+orch — multi-agent CLI orchestrator
+
+USAGE
+  orch [OPTIONS] [PROMPT...]
+
+OPTIONS
+  -a, --agent AGENT       Force agent (claude|codex|gemini)
+  -t, --task TYPE         Task type (generate|review|explain|refactor|test|debug)
+      --model MODEL       Override model for selected agent
+  -f, --fanout            Run on all configured agents in parallel
+      --pipeline CHAIN    Chain agents: "claude,codex"
+  -n, --dry-run           Show routing decision, don't execute
+  -j, --json              JSON output
+      --raw               Raw agent output
+      --config FILE       Alternate config file
+  -v, --verbose           Verbose logging
+      --timeout SECS      Override per-agent timeout
+      --cost              Show cumulative cost summary
+      --history           Show recent invocations
+      --replay ID         Replay a previous invocation
+  -h, --help              Show this help
+
+EXAMPLES
+  orch "explain what a goroutine is"
+  orch -a claude "write a fibonacci function"
+  orch --fanout "what is 2+2"
+  orch --pipeline "claude,codex" "implement a stack"
+  orch --dry-run "review this code"
+  orch --cost
+EOF
+    exit 0
+}
+
+# ── Parse arguments ──
+POSITIONAL=()
+while (( $# > 0 )); do
+    case "$1" in
+        -a|--agent)
+            OPT_AGENT="$2"; shift 2 ;;
+        -t|--task)
+            OPT_TASK="$2"; shift 2 ;;
+        --model)
+            OPT_MODEL="$2"; shift 2 ;;
+        -f|--fanout)
+            OPT_FANOUT=true; shift ;;
+        --pipeline)
+            OPT_PIPELINE="$2"; shift 2 ;;
+        -n|--dry-run)
+            OPT_DRY_RUN=true; shift ;;
+        -j|--json)
+            OPT_OUTPUT_FORMAT="json"; shift ;;
+        --raw)
+            OPT_OUTPUT_FORMAT="raw"; shift ;;
+        --config)
+            OPT_CONFIG="$2"; shift 2 ;;
+        -v|--verbose)
+            OPT_VERBOSE=true; shift ;;
+        --timeout)
+            OPT_TIMEOUT="$2"; shift 2 ;;
+        --cost)
+            OPT_SHOW_COST=true; shift ;;
+        --history)
+            OPT_SHOW_HISTORY=true; shift ;;
+        --replay)
+            OPT_REPLAY="$2"; shift 2 ;;
+        -h|--help)
+            usage ;;
+        --)
+            shift; POSITIONAL+=("$@"); break ;;
+        -*)
+            die "unknown option: $1" ;;
+        *)
+            POSITIONAL+=("$1"); shift ;;
+    esac
+done
+
+# ── Load config ──
+load_config "$OPT_CONFIG"
+
+# ── Apply verbose ──
+if [[ "$OPT_VERBOSE" == true ]]; then
+    set_log_level debug
+else
+    set_log_level "${CONFIG[general_log_level]:-info}"
+fi
+
+# ── Apply output format from config if not set via flag ──
+[[ -z "$OPT_OUTPUT_FORMAT" ]] && OPT_OUTPUT_FORMAT="${CONFIG[general_output_format]:-text}"
+
+# ── Handle --cost ──
+if [[ "$OPT_SHOW_COST" == true ]]; then
+    cost_report
+    exit 0
+fi
+
+# ── Handle --history ──
+if [[ "$OPT_SHOW_HISTORY" == true ]]; then
+    history_show
+    exit 0
+fi
+
+# ── Handle --replay ──
+if [[ -n "$OPT_REPLAY" ]]; then
+    history_replay "$OPT_REPLAY"
+    # Falls through to normal execution with PROMPT/OPT_AGENT/OPT_TASK set
+fi
+
+# ── Assemble prompt ──
+if [[ -z "$PROMPT" ]]; then
+    if (( ${#POSITIONAL[@]} > 0 )); then
+        PROMPT="${POSITIONAL[*]}"
+    elif ! is_tty; then
+        PROMPT=$(cat)
+    fi
+fi
+
+if [[ -z "$PROMPT" ]]; then
+    usage
+fi
+
+# ── Validate explicit agent ──
+[[ -n "$OPT_AGENT" ]] && validate_agent "$OPT_AGENT"
+
+# ── Routing ──
+TASK_TYPE=""
+TASK_CONFIDENCE=""
+SELECTED_AGENT=""
+
+select_agent "$PROMPT"
+
+# ── Dry run ──
+if [[ "$OPT_DRY_RUN" == true ]]; then
+    printf '%stask_type:%s  %s\n' "$BOLD" "$RESET" "$TASK_TYPE"
+    printf '%sagent:%s      %s\n' "$BOLD" "$RESET" "$SELECTED_AGENT"
+    printf '%sconfidence:%s %s\n' "$BOLD" "$RESET" "${TASK_CONFIDENCE:-high}"
+    if [[ -n "$OPT_MODEL" ]]; then
+        printf '%smodel:%s      %s\n' "$BOLD" "$RESET" "$OPT_MODEL"
+    fi
+    exit 0
+fi
+
+# ── Execute ──
+INVOCATION_ID=$(gen_id)
+EXEC_START=$(now_ms)
+RESULT=""
+
+if [[ "$OPT_FANOUT" == true ]]; then
+    # Fan-out mode
+    fanout_execute "$PROMPT"
+    exit $?
+elif [[ -n "$OPT_PIPELINE" ]]; then
+    # Pipeline mode
+    RESULT=$(pipeline_execute "$PROMPT" "$OPT_PIPELINE")
+else
+    # Normal mode with fallback
+    RESULT=$(invoke_with_fallback "$PROMPT" "$SELECTED_AGENT")
+fi
+
+EXEC_END=$(now_ms)
+EXEC_DURATION=$(( EXEC_END - EXEC_START ))
+
+# ── Record cost ──
+if [[ -n "$RESULT" ]]; then
+    cost_record "$RESULT"
+fi
+
+# ── Record history ──
+if [[ -n "$RESULT" ]]; then
+    local_is_error=$(echo "$RESULT" | json_get '.is_error')
+    local_cost=$(echo "$RESULT" | json_get '.cost_usd')
+    local_success="true"
+    [[ "$local_is_error" == "true" ]] && local_success="false"
+
+    history_record \
+        "$INVOCATION_ID" \
+        "$PROMPT" \
+        "${TASK_TYPE:-unknown}" \
+        "$SELECTED_AGENT" \
+        "$EXEC_DURATION" \
+        "${local_cost:-0}" \
+        "$local_success"
+fi
+
+# ── Output ──
+if [[ -n "$RESULT" ]]; then
+    emit_result "$RESULT"
+fi
