@@ -31,78 +31,37 @@ fanout_execute() {
         _fanout_jobs "$prompt" "$tmpdir" "$timeout_secs" "${available[@]}"
     fi
 
-    # Collect results
-    local results="["
-    local first=true
+    # Output results
+    local format="${OPT_OUTPUT_FORMAT:-${CONFIG[general_output_format]:-text}}"
+
     for a in "${available[@]}"; do
         local outfile="$tmpdir/${a}.out"
-        if [[ -f "$outfile" ]]; then
+        if [[ -f "$outfile" ]] && [[ -s "$outfile" ]]; then
             local content
-            content=$(cat "$outfile")
-            if [[ -n "$content" ]]; then
-                $first || results+=","
-                results+="$content"
-                first=false
+            content=$(<"$outfile")
+
+            if [[ "$format" == "json" ]]; then
+                echo "$content" | json_pretty
+            else
+                local text
+                text=$(echo "$content" | json_get '.text')
+                printf '\n%s━━━ %s ━━━%s\n' "$BOLD" "$a" "$RESET"
+                if [[ -n "$text" ]]; then
+                    printf '%s\n' "$text"
+                else
+                    printf '%s(no output)%s\n' "$DIM" "$RESET"
+                fi
+            fi
+        else
+            if [[ "$format" != "json" ]]; then
+                printf '\n%s━━━ %s ━━━%s\n' "$BOLD" "$a" "$RESET"
+                printf '%s(no output)%s\n' "$DIM" "$RESET"
             fi
         fi
     done
-    results+="]"
 
+    log_debug "fanout tmpdir: $tmpdir"
     rm -rf "$tmpdir"
-
-    # Output results
-    local format="${OPT_OUTPUT_FORMAT:-${CONFIG[general_output_format]:-text}}"
-    if [[ "$format" == "json" ]]; then
-        echo "$results" | json_pretty
-    else
-        # Text mode: print each agent's response with header
-        for a in "${available[@]}"; do
-            local text
-            text=$(echo "$results" | json_get ".${a}.text" 2>/dev/null)
-            # Parse from array
-            local idx=0
-            for aa in "${available[@]}"; do
-                if [[ "$aa" == "$a" ]]; then
-                    break
-                fi
-                (( idx++ ))
-            done
-            text=$(echo "$results" | _json_array_get "$idx" "text")
-            printf '\n%s━━━ %s ━━━%s\n' "$BOLD" "$a" "$RESET"
-            if [[ -n "$text" ]]; then
-                printf '%s\n' "$text"
-            else
-                printf '%s(no output)%s\n' "$DIM" "$RESET"
-            fi
-        done
-    fi
-}
-
-_json_array_get() {
-    local idx="$1" field="$2"
-    case "$_json_tool" in
-        jq)
-            jq -r ".[$idx].$field // empty" 2>/dev/null
-            ;;
-        node)
-            node -e "
-                let d='';
-                process.stdin.on('data',c=>d+=c);
-                process.stdin.on('end',()=>{
-                    try{let a=JSON.parse(d);let v=a[$idx]&&a[$idx]['$field'];if(v)process.stdout.write(String(v))}catch(e){}
-                });
-            " 2>/dev/null
-            ;;
-        python3)
-            python3 -c "
-import sys,json
-try:
-    a=json.load(sys.stdin);v=a[$idx].get('$field','')
-    if v:print(v,end='')
-except:pass
-" 2>/dev/null
-            ;;
-    esac
 }
 
 _fanout_tmux() {
@@ -154,7 +113,6 @@ SCRIPT
 
     # Attach to session
     if [[ -n "${TMUX:-}" ]]; then
-        # Already in tmux, switch to the window
         tmux select-window -t "$session" 2>/dev/null
     else
         tmux attach -t "$session" 2>/dev/null
@@ -185,20 +143,22 @@ _fanout_jobs() {
 
     for a in "${agents[@]}"; do
         (
-            local result
-            result=$(invoke_"$a" "$prompt" 2>/dev/null)
-            echo "$result" > "$tmpdir/${a}.out"
+            invoke_"$a" "$prompt" > "$tmpdir/${a}.out" 2>"$tmpdir/${a}.err"
         ) &
         pids+=($!)
     done
 
-    # Wait for all jobs with timeout
+    # Wait for all with timeout
     local deadline=$(( $(date +%s) + timeout_secs ))
-    for pid in "${pids[@]}"; do
-        local remaining=$(( deadline - $(date +%s) ))
-        if (( remaining > 0 )); then
-            timeout "$remaining" tail --pid="$pid" -f /dev/null 2>/dev/null || true
-        fi
+    local all_done=false
+    while ! $all_done && (( $(date +%s) < deadline )); do
+        all_done=true
+        for pid in "${pids[@]}"; do
+            if kill -0 "$pid" 2>/dev/null; then
+                all_done=false
+            fi
+        done
+        $all_done || sleep 1
     done
 
     # Kill any remaining

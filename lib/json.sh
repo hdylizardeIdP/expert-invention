@@ -53,9 +53,20 @@ except: pass
     esac
 }
 
+# Check if a value should be treated as raw JSON (not quoted).
+# Matches: objects {}, arrays [], booleans, null, and pure numbers.
+_is_json_raw() {
+    local v="$1"
+    [[ "$v" =~ ^\{.*\}$ ]] && return 0   # JSON object
+    [[ "$v" =~ ^\[.*\]$ ]] && return 0   # JSON array
+    [[ "$v" == "true" || "$v" == "false" || "$v" == "null" ]] && return 0
+    [[ "$v" =~ ^-?[0-9]+\.?[0-9]*$ ]] && return 0  # number
+    return 1
+}
+
 # Build a JSON object from key=value pairs.
 # Usage: json_build key1 val1 key2 val2 ...
-# Values starting with { or [ or true/false/null or digits are treated as raw JSON.
+# Values that are objects, arrays, booleans, null, or pure numbers are raw JSON.
 json_build() {
     local args=("$@")
     case "$_json_tool" in
@@ -66,7 +77,7 @@ json_build() {
                 local k="${args[$i]}" v="${args[$((i+1))]}"
                 if (( i > 0 )); then filter+=","; fi
                 # Check if value looks like raw JSON
-                if [[ "$v" =~ ^(\{|\[|true$|false$|null$|[0-9]) ]]; then
+                if _is_json_raw "$v"; then
                     filter+="\"$k\":$v"
                 else
                     filter+="\"$k\":\$v${i}"
@@ -83,7 +94,7 @@ json_build() {
             while (( i < ${#args[@]} )); do
                 local k="${args[$i]}" v="${args[$((i+1))]}"
                 if (( i > 0 )); then pairs+=","; fi
-                if [[ "$v" =~ ^(\{|\[|true$|false$|null$|[0-9]) ]]; then
+                if _is_json_raw "$v"; then
                     pairs+="\"$k\":$v"
                 else
                     pairs+="\"$k\":$(node -e "process.stdout.write(JSON.stringify(process.argv[1]))" "$v" 2>/dev/null)"
@@ -98,7 +109,7 @@ json_build() {
             while (( i < ${#args[@]} )); do
                 local k="${args[$i]}" v="${args[$((i+1))]}"
                 if (( i > 0 )); then py_pairs+=","; fi
-                if [[ "$v" =~ ^(\{|\[|true$|false$|null$|[0-9]) ]]; then
+                if _is_json_raw "$v"; then
                     py_pairs+="\"$k\":$v"
                 else
                     py_pairs+="\"$k\":$(python3 -c "import json;print(json.dumps('$v'),end='')" 2>/dev/null)"
