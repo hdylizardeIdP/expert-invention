@@ -29,6 +29,7 @@ OPT_AGENT=""
 OPT_TASK=""
 OPT_MODEL=""
 OPT_FANOUT=false
+OPT_FANOUT_AGENTS=""
 OPT_PIPELINE=""
 OPT_DRY_RUN=false
 OPT_OUTPUT_FORMAT=""
@@ -53,6 +54,7 @@ OPTIONS
   -t, --task TYPE         Task type (generate|review|explain|refactor|test|debug)
       --model MODEL       Override model for selected agent
   -f, --fanout            Run on all configured agents in parallel
+      --agents LIST       Comma-separated agents for fanout (e.g. codex,gemini)
       --pipeline CHAIN    Chain agents: "claude,codex"
   -n, --dry-run           Show routing decision, don't execute
   -j, --json              JSON output
@@ -69,6 +71,7 @@ EXAMPLES
   orch "explain what a goroutine is"
   orch -a claude "write a fibonacci function"
   orch --fanout "what is 2+2"
+  orch --fanout --agents codex,gemini "review this code"
   orch --pipeline "claude,codex" "implement a stack"
   orch --dry-run "review this code"
   orch --cost
@@ -88,6 +91,8 @@ while (( $# > 0 )); do
             OPT_MODEL="$2"; shift 2 ;;
         -f|--fanout)
             OPT_FANOUT=true; shift ;;
+        --agents)
+            OPT_FANOUT_AGENTS="$2"; shift 2 ;;
         --pipeline)
             OPT_PIPELINE="$2"; shift 2 ;;
         -n|--dry-run)

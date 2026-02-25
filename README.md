@@ -28,6 +28,7 @@ Prompt can also be piped via stdin.
 | `-t, --task TYPE` | Declare task type (`generate\|review\|explain\|refactor\|test\|debug`) |
 | `--model MODEL` | Override model for selected agent |
 | `-f, --fanout` | Run on all agents in parallel (tmux panes) |
+| `--agents LIST` | Comma-separated agents for fanout (e.g. `codex,gemini`) |
 | `--pipeline CHAIN` | Chain agents sequentially: `"claude,codex"` |
 | `-n, --dry-run` | Show routing decision without executing |
 | `-j, --json` | JSON normalized output |
@@ -53,6 +54,9 @@ orch --dry-run "review this code"
 
 # Fan-out: all agents answer in parallel (tmux panes)
 orch --fanout "what is 2+2"
+
+# Fan-out with specific agents only
+orch --fanout --agents codex,gemini "review this code: $(cat file.ts)"
 
 # Pipeline: claude generates, codex refines
 orch --pipeline "claude,codex" "implement a stack in python"

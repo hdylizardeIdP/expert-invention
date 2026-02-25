@@ -3,9 +3,20 @@
 
 fanout_execute() {
     local prompt="$1"
-    local agents_str="${CONFIG[fanout_agents]:-claude codex gemini}"
+    local agents_str
+    if [[ -n "${OPT_FANOUT_AGENTS:-}" ]]; then
+        # --agents flag: comma or space separated
+        agents_str="${OPT_FANOUT_AGENTS//,/ }"
+    else
+        agents_str="${CONFIG[fanout_agents]:-claude codex gemini}"
+    fi
     local timeout_secs="${OPT_TIMEOUT:-${CONFIG[fanout_timeout]:-120}}"
     read -ra agents <<< "$agents_str"
+
+    # Validate agent names
+    for a in "${agents[@]}"; do
+        validate_agent "$a"
+    done
 
     local tmpdir
     tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/orch-fanout.XXXXXX")
